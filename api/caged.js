@@ -1,4 +1,4 @@
-const { GoogleAuth } = require('google-auth-library');
+const { BigQuery } = require('@google-cloud/bigquery');
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -10,6 +10,7 @@ return res.status(200).end();
   }
 
   const { cnpj } = req.query;
+
   if (!cnpj) {
 return res.status(400).json({ error: 'CNPJ é obrigatório' });
   }
@@ -21,43 +22,76 @@ return res.status(500).json({ error: 'Credenciais não configuradas' });
 
   try {
 const credentials = JSON.parse(credentialsJson);
-const auth = new GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/bigquery'] });
-const client = await auth.getClient();
-const token = await client.getAccessToken();
+const bigquery = new BigQuery({
+  credentials: credentials,
+  projectId: credentials.project_id
+});
+
+const cnpjLimpo = cnpj.replace(/\D/g, '').padStart(14, '0');
 
 const query = `
   SELECT 
-    SUM(CASE WHEN tipo_movimentacao = 1 THEN 1 ELSE 0 END) as admissoes,
-    SUM(CASE WHEN tipo_movimentacao = 2 THEN 1 ELSE 0 END) as demissoes,
-    AVG(salario_mensal) as salario_medio,
-    MIN(ano) as primeiro_ano,
-    MAX(ano) as ultimo_ano
+    ano,
+    mes,
+    SUM(CASE WHEN saldomovimentacao = 1 THEN 1 ELSE 0 END) as admissoes,
+    SUM(CASE WHEN saldomovimentacao = -1 THEN 1 ELSE 0 END) as demissoes,
+    SUM(saldomovimentacao) as saldo,
+    AVG(salario) as salario_medio
   FROM \`basedosdados.br_me_caged.microdados_movimentacao\`
-  WHERE cnpj_basico = '${cnpj.substring(0, 8)}'
+  WHERE cnpj_basico = @cnpj_basico
+  GROUP BY ano, mes
+  ORDER BY ano DESC, mes DESC
 `;
 
-const response = await fetch('https://bigquery.googleapis.com/bigquery/v2/projects/basedosdados/queries', {
-  method: 'POST',
-  headers: { 'Authorization': `Bearer ${token.token}`, 'Content-Type': 'application/json' },
-  body: JSON.stringify({ query, useLegacySql: false })
-});
+const cnpjBasico = cnpjLimpo.substring(0, 8);
 
-const data = await response.json();
-if (data.error) {
-  return res.status(500).json({ error: data.error.message });
+const options = {
+  query: query,
+  params: { cnpj_basico: cnpjBasico },
+  location: 'US'
+};
+
+const [rows] = await bigquery.query(options);
+
+if (rows.length === 0) {
+  return res.status(200).json({
+    found: false,
+    cnpj: cnpjLimpo,
+    message: 'Nenhum dado CAGED encontrado para este CNPJ'
+  });
 }
 
-const row = data.rows?.[0]?.f || [];
+let totalAdmissoes = 0;
+let totalDemissoes = 0;
+let somasSalarios = 0;
+let countSalarios = 0;
+
+rows.forEach(row => {
+  totalAdmissoes += row.admissoes || 0;
+  totalDemissoes += row.demissoes || 0;
+  if (row.salario_medio) {
+    somasSalarios += row.salario_medio;
+    countSalarios++;
+  }
+});
+
+const saldoFinal = totalAdmissoes - totalDemissoes;
+const salarioMedio = countSalarios > 0 ? somasSalarios / countSalarios : null;
+
 return res.status(200).json({
   found: true,
-  total_admissoes: parseInt(row[0]?.v || 0),
-  total_demissoes: parseInt(row[1]?.v || 0),
-  saldo_funcionarios: parseInt(row[0]?.v || 0) - parseInt(row[1]?.v || 0),
-  salario_medio: parseFloat(row[2]?.v || 0),
-  primeiro_ano: row[3]?.v,
-  ultimo_ano: row[4]?.v
+  cnpj: cnpjLimpo,
+  saldo_funcionarios: saldoFinal,
+  total_admissoes: totalAdmissoes,
+  total_demissoes: totalDemissoes,
+  salario_medio: salarioMedio ? salarioMedio.toFixed(2) : null,
+  primeiro_ano: rows[rows.length - 1]?.ano,
+  ultimo_ano: rows[0]?.ano,
+  historico: rows
 });
+
   } catch (error) {
+console.error('Erro:', error);
 return res.status(500).json({ error: error.message });
   }
 };

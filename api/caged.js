@@ -9,12 +9,6 @@ module.exports = async (req, res) => {
 return res.status(200).end();
   }
 
-  const { cnpj } = req.query;
-
-  if (!cnpj) {
-return res.status(400).json({ error: 'CNPJ é obrigatório' });
-  }
-
   const credentialsJson = process.env.GOOGLE_CLOUD_CREDENTIALS;
   if (!credentialsJson) {
 return res.status(500).json({ error: 'Credenciais não configuradas' });
@@ -27,67 +21,19 @@ const bigquery = new BigQuery({
   projectId: credentials.project_id
 });
 
-const cnpjLimpo = cnpj.replace(/\D/g, '').padStart(14, '0');
-
-const query = `
-  SELECT 
-    ano,
-    mes,
-    SUM(CASE WHEN saldomovimentacao = 1 THEN 1 ELSE 0 END) as admissoes,
-    SUM(CASE WHEN saldomovimentacao = -1 THEN 1 ELSE 0 END) as demissoes,
-    SUM(saldomovimentacao) as saldo,
-    AVG(salario) as salario_medio
-  FROM \`basedosdados.br_me_caged.microdados_movimentacao\`
-  WHERE cnpj_basico = @cnpj_basico
-  GROUP BY ano, mes
-  ORDER BY ano DESC, mes DESC
+// Query para descobrir as colunas da tabela
+const schemaQuery = `
+  SELECT column_name, data_type
+  FROM \`basedosdados.br_me_caged.INFORMATION_SCHEMA.COLUMNS\`
+  WHERE table_name = 'microdados_movimentacao'
+  ORDER BY ordinal_position
 `;
 
-const cnpjBasico = cnpjLimpo.substring(0, 8);
+const [columns] = await bigquery.query({ query: schemaQuery, location: 'US' });
 
-const options = {
-  query: query,
-  params: { cnpj_basico: cnpjBasico },
-  location: 'US'
-};
-
-const [rows] = await bigquery.query(options);
-
-if (rows.length === 0) {
-  return res.status(200).json({
-    found: false,
-    cnpj: cnpjLimpo,
-    message: 'Nenhum dado CAGED encontrado para este CNPJ'
-  });
-}
-
-let totalAdmissoes = 0;
-let totalDemissoes = 0;
-let somasSalarios = 0;
-let countSalarios = 0;
-
-rows.forEach(row => {
-  totalAdmissoes += row.admissoes || 0;
-  totalDemissoes += row.demissoes || 0;
-  if (row.salario_medio) {
-    somasSalarios += row.salario_medio;
-    countSalarios++;
-  }
-});
-
-const saldoFinal = totalAdmissoes - totalDemissoes;
-const salarioMedio = countSalarios > 0 ? somasSalarios / countSalarios : null;
-
-return res.status(200).json({
-  found: true,
-  cnpj: cnpjLimpo,
-  saldo_funcionarios: saldoFinal,
-  total_admissoes: totalAdmissoes,
-  total_demissoes: totalDemissoes,
-  salario_medio: salarioMedio ? salarioMedio.toFixed(2) : null,
-  primeiro_ano: rows[rows.length - 1]?.ano,
-  ultimo_ano: rows[0]?.ano,
-  historico: rows
+return res.status(200).json({ 
+  message: 'Colunas da tabela CAGED',
+  columns: columns 
 });
 
   } catch (error) {
